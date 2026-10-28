@@ -218,26 +218,27 @@ function checkSystemReady() {
 function normalizarTamano(raw) {
   let s = raw.toUpperCase()
     .replace(/[O]/g, "0")
-    .replace(/[IL|]/g, "1")
+    .replace(/[IL|!]/g, "1")
+    .replace(/[Z]/g, "2")
+    .replace(/[A]/g, "4") // "30AZ" -> "3042"
     .replace(/[S]/g, "5")
+    .replace(/[G]/g, "6")
+    .replace(/[B]/g, "8")
     .replace(/\s+/g, "");
 
-  // 1. Coincidencia directa o invertida (ej. 40*50 -> 50*40)
   for (const item of CATALOGO_TAMANOS) {
     if (item.regex.test(s)) return item.canonico;
   }
 
-  // 2. Si leyó 5 dígitos (ej. "18722" donde el medio es el '*') o 4 dígitos ("1622")
   const digitos = s.replace(/[^0-9]/g, "");
   let parLectura = "";
   if (digitos.length === 5) {
-    parLectura = digitos.slice(0, 2) + digitos.slice(3, 5); // "18722" -> "1822"
+    parLectura = digitos.slice(0, 2) + digitos.slice(3, 5);
   } else if (digitos.length === 4) {
     parLectura = digitos;
   }
 
   if (parLectura.length === 4) {
-    // Buscar cuál tamaño oficial tiene al menos 3 de los 4 dígitos iguales (corrige 1822 -> 16*22)
     let mejorTam = null;
     let maxCoincidencias = 0;
     for (const item of CATALOGO_TAMANOS) {
@@ -302,17 +303,18 @@ function normalizarModeloMarco(raw) {
 function aplicarReglasTamañoPrecio(registro) {
   const tamEsOficial = CATALOGO_TAMANOS.some(t => t.canonico === registro.tamano);
 
-  // 1. Si el tamaño NO quedó en la lista oficial (ej. "18722") pero el precio es 150, 190, 310 o 430, el precio corrige el tamaño
+  // Respaldo precio -> tamaño (incluye 300 en vez de 310 para 30*42)
   if (!tamEsOficial && registro.precio) {
-    const porPrecio = CATALOGO_TAMANOS.find(t => t.precioBase === registro.precio);
-    if (porPrecio) {
-      registro.tamano = porPrecio.canonico;
+    if (registro.precio === "300" || registro.precio === "310") registro.tamano = "30*42";
+    else {
+      const porPrecio = CATALOGO_TAMANOS.find(t => t.precioBase === registro.precio);
+      if (porPrecio) registro.tamano = porPrecio.canonico;
     }
   }
 
-  // 2. Si el tamaño es oficial, asegura que el precio sea el que le corresponde
+  // Si el precio estaba vacío pero el tamaño es oficial, se rellena con el precio base
   const infoTam = CATALOGO_TAMANOS.find(t => t.canonico === registro.tamano);
-  if (infoTam && infoTam.precioBase) {
+  if (infoTam && infoTam.precioBase && !registro.precio) {
     registro.precio = infoTam.precioBase;
   }
 }
@@ -363,55 +365,99 @@ function crearCanvasCeldaLimpia(imgElement, rect) {
   const sw = Math.max(1, rect.w - pad * 2);
   const sh = Math.max(1, rect.h - pad * 2);
 
-  const scale = 2.5; // Mayor escala para que el '4', 'A-2' y '16*22' se lean con total nitidez
-  const border = 14;
+  const scale = 3.0;
+  const tempCanvas = document.createElement("canvas");
+  tempCanvas.width = Math.round(sw * scale);
+  tempCanvas.height = Math.round(sh * scale);
+  const tempCtx = tempCanvas.getContext("2d");
 
-  const canvas = document.createElement("canvas");
-  canvas.width = Math.round(sw * scale + border * 2);
-  canvas.height = Math.round(sh * scale + border * 2);
-  const ctx = canvas.getContext("2d");
+  tempCtx.imageSmoothingEnabled = true;
+  tempCtx.imageSmoothingQuality = "high";
+  tempCtx.drawImage(imgElement, sx, sy, sw, sh, 0, 0, tempCanvas.width, tempCanvas.height);
 
-  ctx.fillStyle = "#FFFFFF";
-  ctx.fillRect(0, 0, canvas.width, canvas.height);
-  ctx.drawImage(imgElement, sx, sy, sw, sh, border, border, Math.round(sw * scale), Math.round(sh * scale));
-
-  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const imgData = tempCtx.getImageData(0, 0, tempCanvas.width, tempCanvas.height);
   const data = imgData.data;
 
-  // 1. Detectar el color promedio del fondo usando los píxeles de la celda
+  // 1. Color del fondo medido en los bordes superior e inferior
   let rBg = 0, gBg = 0, bBg = 0, countBg = 0;
-  for (let i = 0; i < data.length; i += 16) {
-    rBg += data[i]; gBg += data[i + 1]; bBg += data[i + 2];
-    countBg++;
+  const w = tempCanvas.width, h = tempCanvas.height;
+  for (let x = 0; x < w; x += 2) {
+    const iTop = x * 4;
+    const iBot = ((h - 1) * w + x) * 4;
+    rBg += data[iTop] + data[iBot];
+    gBg += data[iTop + 1] + data[iBot + 1];
+    bBg += data[iTop + 2] + data[iBot + 2];
+    countBg += 2;
   }
   rBg /= countBg; gBg /= countBg; bBg /= countBg;
 
-  // 2. Todo píxel que se aleje del color de fondo (sea letra negra, roja o azul) se vuelve negro puro
-  for (let i = 0; i < data.length; i += 4) {
-    const r = data[i], g = data[i + 1], b = data[i + 2];
-    const diffFondo = Math.abs(r - rBg) + Math.abs(g - gBg) + Math.abs(b - bBg);
-    const esOscuro = (r + g + b) < 380; // Letras negras/rojas/azules
-    const val = (diffFondo > 85 && esOscuro) ? 0 : 255;
-    data[i] = val; data[i + 1] = val; data[i + 2] = val; data[i + 3] = 255;
+  // 2. Escala de grises y caja exacta donde hay tinta (Auto-Trim)
+  let minX = w, minY = h, maxX = 0, maxY = 0, hayTinta = false;
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const r = data[i], g = data[i + 1], b = data[i + 2];
+      const diff = Math.max(Math.abs(rBg - r), Math.abs(gBg - g), Math.abs(bBg - b));
+
+      let gris = 255;
+      if (diff > 28) {
+        gris = Math.max(0, Math.min(255, Math.round(255 - (diff * 2.1))));
+        if (gris < 190) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          hayTinta = true;
+        }
+      }
+      data[i] = gris; data[i + 1] = gris; data[i + 2] = gris; data[i + 3] = 255;
+    }
   }
-  ctx.putImageData(imgData, 0, 0);
-  return canvas;
+  tempCtx.putImageData(imgData, 0, 0);
+
+  // 3. Recortar solo la zona con texto + margen blanco de 14px
+  const border = 14;
+  const cropW = hayTinta ? Math.max(20, maxX - minX + 1) : w;
+  const cropH = hayTinta ? Math.max(16, maxY - minY + 1) : h;
+  const startX = hayTinta ? minX : 0;
+  const startY = hayTinta ? minY : 0;
+
+  const finalCanvas = document.createElement("canvas");
+  finalCanvas.width = cropW + border * 2;
+  finalCanvas.height = cropH + border * 2;
+  const finalCtx = finalCanvas.getContext("2d");
+  finalCtx.fillStyle = "#FFFFFF";
+  finalCtx.fillRect(0, 0, finalCanvas.width, finalCanvas.height);
+  finalCtx.drawImage(tempCanvas, startX, startY, cropW, cropH, border, border, cropW, cropH);
+
+  return finalCanvas;
 }
 
-function limpiarValorPorTipo(texto, tipo) {
-  let t = texto.trim().replace(/\n/g, " ");
+function limpiarValorPorTipo(texto, tipo, idCampo = "") {
+  let t = texto.trim().replace(/\n/g, " ").replace(/\s+/g, " ");
+
   if (tipo === "numero") {
-    return t.replace(/[oO]/g, "0").replace(/[lI|]/g, "1").replace(/[sS]/g, "5").replace(/[^0-9]/g, "");
+    let num = t.replace(/[oO]/g, "0").replace(/[lI|!]/g, "1").replace(/[zZ]/g, "2").replace(/[sS]/g, "5").replace(/[^0-9]/g, "");
+    // Teléfono: celulares de Bolivia = 8 dígitos; recorta un dígito fantasma final
+    if (idCampo === "telefono" && num.length === 9 && (num.startsWith("6") || num.startsWith("7"))) {
+      num = num.slice(0, 8);
+    }
+    return num;
   } else if (tipo === "fecha") {
-    return t.replace(/[oO]/g, "0").replace(/[lI|]/g, "1").replace(/[^0-9\-/]/g, "");
+    return t.replace(/[oO]/g, "0").replace(/[lI|!]/g, "1").replace(/[^0-9\-/]/g, "");
   } else if (tipo === "hora") {
-    return t.replace(/[oO]/g, "0").replace(/[lI|]/g, "1").replace(/[^0-9:]/g, "");
+    return t.replace(/[oO]/g, "0").replace(/[lI|!]/g, "1").replace(/[^0-9:]/g, "");
   } else if (tipo === "medida") {
     return normalizarTamano(t);
   } else if (tipo === "modelo") {
     return normalizarModeloMarco(t);
   } else {
-    return t.replace(/^[|_—\-.,:;]+|[|_—\-.,:;]+$/g, "").trim();
+    let limpio = t.toUpperCase().replace(/^[|_—\-.,:;'"`~]+|[|_—\-.,:;'"`~]+$/g, "").trim();
+    // Nombres de personas: sin números infiltrados
+    if (["solicitante", "fallecido", "coordinador"].includes(idCampo)) {
+      limpio = limpio.replace(/0/g, "O").replace(/1/g, "I").replace(/5/g, "S").replace(/[^A-ZÑÁÉÍÓÚÜ.\s]/g, "");
+    }
+    return limpio.replace(/\s+/g, " ").trim();
   }
 }
 
@@ -468,6 +514,24 @@ async function escanearUnaImagen(imgElement, nombreArchivo) {
     // Dibujar paredes verticales izquierda y derecha en la máscara
     cv.line(mask, new cv.Point(xIzq, yTop), new cv.Point(xIzq, yBot), new cv.Scalar(255), 3);
     cv.line(mask, new cv.Point(xDer, yTop), new cv.Point(xDer, yBot), new cv.Scalar(255), 3);
+
+    // Reforzar de arriba a abajo la línea vertical divisoria entre etiquetas y valores
+    let mejorColDiv = -1, maxPuntosV = 0;
+    const rangoMin = Math.round(xIzq + (xDer - xIzq) * 0.18);
+    const rangoMax = Math.round(xIzq + (xDer - xIzq) * 0.45);
+    for (let c = rangoMin; c <= rangoMax; c++) {
+      let sumaV = 0;
+      for (let r = yTop; r <= yBot; r += 3) {
+        if (vert.ucharPtr(r)[c] > 0) sumaV++;
+      }
+      if (sumaV > maxPuntosV) {
+        maxPuntosV = sumaV;
+        mejorColDiv = c;
+      }
+    }
+    if (mejorColDiv !== -1) {
+      cv.line(mask, new cv.Point(mejorColDiv, yTop), new cv.Point(mejorColDiv, yBot), new cv.Scalar(255), 3);
+    }
   }
 
   let contours = new cv.MatVector(), hierarchy = new cv.Mat();
@@ -524,16 +588,34 @@ async function escanearUnaImagen(imgElement, nombreArchivo) {
   };
   CAMPOS_OFICIALES.forEach(c => registro[c.id] = "");
 
+  let ultimoCampoIdx = -1;
+
   for (let i = 0; i < paresFilas.length; i++) {
     const { izq, der } = paresFilas[i];
     const canvasIzq = crearCanvasCeldaLimpia(imgElement, izq);
     const resIzq = await ocrWorker.recognize(canvasIzq);
-    const campoOficial = encontrarCampoOficial(resIzq.data.text.trim());
+    const textoIzq = resIzq.data.text.trim();
 
-    if (campoOficial && !registro[campoOficial.id]) {
-      const canvasDer = crearCanvasCeldaLimpia(imgElement, der);
-      const resDer = await ocrWorker.recognize(canvasDer);
-      registro[campoOficial.id] = limpiarValorPorTipo(resDer.data.text, campoOficial.tipo);
+    // Fila verde separadora "Detalle": lo siguiente es Tamaño
+    if (similitudTexto(textoIzq, "DETALLE") > 0.65) {
+      ultimoCampoIdx = CAMPOS_OFICIALES.findIndex(c => c.id === "coordinador");
+      continue;
+    }
+
+    let campoOficial = encontrarCampoOficial(textoIzq);
+
+    // Respaldo por orden de fila cuando la etiqueta pequeña no se leyó
+    if (!campoOficial && ultimoCampoIdx >= 0 && ultimoCampoIdx + 1 < CAMPOS_OFICIALES.length) {
+      campoOficial = CAMPOS_OFICIALES[ultimoCampoIdx + 1];
+    }
+
+    if (campoOficial) {
+      ultimoCampoIdx = CAMPOS_OFICIALES.findIndex(c => c.id === campoOficial.id);
+      if (!registro[campoOficial.id]) {
+        const canvasDer = crearCanvasCeldaLimpia(imgElement, der);
+        const resDer = await ocrWorker.recognize(canvasDer);
+        registro[campoOficial.id] = limpiarValorPorTipo(resDer.data.text, campoOficial.tipo, campoOficial.id);
+      }
     }
   }
 
